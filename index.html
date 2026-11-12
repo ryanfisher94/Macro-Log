@@ -105,7 +105,7 @@ input[type=file]{font-size:14px}
 #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:20px;font-weight:600;font-size:14px;z-index:50}
 @media (prefers-reduced-motion:no-preference){.bar i,.ring circle{transition:all .35s ease}}
 </style>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/barcode-detector@3.0.5/dist/iife/ponyfill.js"></script>
 </head>
 <body>
 
@@ -178,7 +178,7 @@ input[type=file]{font-size:14px}
 
     <div id="tab-scan" hidden style="display:flex;flex-direction:column;gap:10px">
       <div class="small muted">Point the camera at a barcode, or type the number printed under it. Product data comes from Open Food Facts, a free public database.</div>
-      <div id="reader" style="width:100%;border-radius:10px;overflow:hidden"></div>
+      <video id="camVideo" playsinline muted hidden style="width:100%;max-height:44vh;object-fit:cover;border-radius:10px;background:#000"></video>
       <div class="actions" style="justify-content:flex-start"><button type="button" class="btn primary" id="camBtn">Start camera</button><label class="btn" style="flex-direction:row;color:var(--ink);font-size:15px">Use a photo<input type="file" id="scanFile" accept="image/*" hidden></label></div>
       <div style="display:flex;gap:8px"><input id="codeInput" inputmode="numeric" placeholder="Barcode number" autocomplete="off"><button type="button" class="btn" id="codeGo">Look up</button></div>
       <div id="scanOut"></div>
@@ -363,15 +363,16 @@ $("tab-manual").addEventListener("submit",e=>{
 $("fDelete").onclick=()=>{day().entries=day().entries.filter(x=>x.id!==S.editId);saveDay();render();$("addDlg").close();toast("Deleted")};
 
 /* ---------- barcode and online lookup (Open Food Facts) ---------- */
-let cam=null,camOn=false;
-async function stopCam(){if(cam&&camOn){camOn=false;try{await cam.stop()}catch(e){}}$("camBtn").textContent="Start camera"}
+let camStream=null,camTimer=null,camStarting=false,det=null;
+function getDet(){if(det)return det;const BD=(window.BarcodeDetectionAPI&&window.BarcodeDetectionAPI.BarcodeDetector)||window.BarcodeDetector;if(!BD)return null;try{det=new BD({formats:["upc_a","upc_e","ean_13","ean_8","code_128"]})}catch(e){det=null}return det}
+function stopCam(){clearInterval(camTimer);camTimer=null;if(camStream){camStream.getTracks().forEach(t=>t.stop());camStream=null}const v=$("camVideo");v.srcObject=null;v.hidden=true;$("camBtn").textContent="Start camera"}
+const codeKey=c=>String(c||"").replace(/^0+/,"");
 const OFF_FIELDS="product_name,brands,serving_size,nutriments";
 function offItem(p){
   const n=p.nutriments||{},per=n["energy-kcal_serving"]!=null?"_serving":"_100g",g=k=>num(n[k+per]);
   const name=[p.brands&&String(p.brands).split(",")[0].trim(),p.product_name].filter(Boolean).join(" ").slice(0,80);
   return {name:name||"Unnamed product",serving:per==="_serving"?String(p.serving_size||"1 serving").slice(0,40):"100 g",kcal:R(g("energy-kcal")),p:g("proteins"),c:g("carbohydrates"),f:g("fat"),fiber:g("fiber"),sodium:R(g("sodium")*1000)};
 }
-function newCam(){const F=window.Html5QrcodeSupportedFormats;return new Html5Qrcode("reader",{formatsToSupport:F?[F.UPC_A,F.UPC_E,F.EAN_13,F.EAN_8,F.CODE_128]:undefined,experimentalFeatures:{useBarCodeDetectorIfSupported:true},verbose:false})}
 async function usda(code){
   const r=await fetch("https://api.nal.usda.gov/fdc/v1/foods/search?query="+code+"&dataType=Branded&pageSize=5&api_key=DEMO_KEY");if(!r.ok)return null;
   const j=await r.json(),strip=x=>String(x||"").replace(/^0+/,""),f=(j.foods||[]).find(x=>strip(x.gtinUpc)===strip(code));if(!f)return null;
@@ -382,7 +383,7 @@ async function lookup(code){
   code=String(code||"").replace(/\D/g,"");const out=$("scanOut");
   if(code.length<8){out.innerHTML='<div class="note">That does not look like a full barcode number.</div>';return}
   $("codeInput").value=code;
-  const saved=S.foods.find(f=>f.code===code);
+  const saved=S.foods.find(f=>f.code&&codeKey(f.code)===codeKey(code));
   if(saved){out.innerHTML="";fillForm({...saved,meal:S.addMeal});toast("Found in your saved foods");return}
   out.innerHTML='<div class="note">Looking up '+esc(code)+'…</div>';
   let it=null,netErr=false;
@@ -394,16 +395,27 @@ async function lookup(code){
   $("enterNow").onclick=()=>{S.pendingCode=code;fillForm({meal:S.addMeal})};
 }
 $("camBtn").onclick=async()=>{
-  if(camOn){stopCam();return}
-  if(!window.Html5Qrcode){$("scanOut").innerHTML='<div class="note">The camera scanner did not load. Type the barcode number instead.</div>';return}
+  if(camStream){stopCam();return}
+  if(camStarting)return;
+  const d=getDet(),out=$("scanOut"),v=$("camVideo");
+  if(!d||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){out.innerHTML='<div class="note">Camera scanning is not available in this browser. Type the number printed under the barcode.</div>';return}
+  camStarting=true;
   try{
-    cam=cam||newCam();camOn=true;$("camBtn").textContent="Stop camera";$("scanOut").innerHTML='<div class="note">Hold the barcode inside the box, about 6 inches away, and keep it steady. If it will not read, type the number printed under the bars.</div>';
-    await cam.start({facingMode:"environment"},{fps:15,qrbox:(w,h)=>({width:Math.floor(w*0.92),height:Math.floor(Math.min(h*0.5,w*0.5))}),videoConstraints:{facingMode:"environment",width:{ideal:1920},height:{ideal:1080}}},async txt=>{if(!camOn)return;await stopCam();lookup(txt)},()=>{});
-  }catch(e){camOn=false;$("camBtn").textContent="Start camera";$("scanOut").innerHTML='<div class="note">The camera could not start. Allow camera access for this site, use a photo, or type the number.</div>'}
+    camStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}}});
+    v.srcObject=camStream;v.hidden=false;await v.play();$("camBtn").textContent="Stop camera";
+    out.innerHTML='<div class="note">Point the camera at the barcode and hold steady for a second. Any angle works. If it will not read, type the number printed under the bars.</div>';
+    let busy=false;
+    camTimer=setInterval(async()=>{
+      if(busy||!camStream||v.readyState<2)return;busy=true;
+      try{const r=await d.detect(v);if(r&&r[0]&&r[0].rawValue&&camStream){const code=r[0].rawValue;stopCam();lookup(code)}}catch(e){}
+      busy=false;
+    },250);
+  }catch(e){stopCam();out.innerHTML='<div class="note">The camera could not start. Allow camera access for this site, use a photo, or type the number.</div>'}
+  camStarting=false;
 };
 $("scanFile").addEventListener("change",async e=>{
-  const f=e.target.files[0];if(!f)return;await stopCam();
-  try{if(!window.Html5Qrcode)throw 0;cam=cam||newCam();lookup(await cam.scanFile(f,false))}
+  const f=e.target.files[0];if(!f)return;stopCam();const d=getDet();
+  try{if(!d)throw 0;const r=await d.detect(await createImageBitmap(f));if(!r||!r[0])throw 0;lookup(r[0].rawValue)}
   catch(_){$("scanOut").innerHTML='<div class="note">No barcode found in that photo. Try a closer, sharper shot or type the number.</div>'}
   e.target.value="";
 });
