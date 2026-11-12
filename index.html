@@ -333,7 +333,7 @@ function fillForm(f,editing){
   $("fMeal").value=f.meal||S.addMeal;S.editId=editing?f.id:null;$("fSodium").value=f.sodium||"";S.formExtra={fiber:f.fiber||0};
   $("fDelete").hidden=!editing;$("fSave").textContent=editing?"Save changes":"Add to log";showTab("manual");
 }
-function openAdd(meal){S.addMeal=meal;$("addTitle").textContent="Add to "+meal.toLowerCase();$("tabs").hidden=false;fillForm({});showTab("foods");$("foodSearch").value="";renderFoods();$("addDlg").showModal()}
+function openAdd(meal){S.addMeal=meal;S.pendingCode=null;$("addTitle").textContent="Add to "+meal.toLowerCase();$("tabs").hidden=false;fillForm({});showTab("foods");$("foodSearch").value="";renderFoods();$("addDlg").showModal()}
 function openEdit(id){const e=day().entries.find(x=>x.id===id);if(!e)return;$("addTitle").textContent="Edit entry";$("tabs").hidden=true;fillForm(e,true);$("addDlg").showModal()}
 function renderFoods(){
   const q=$("foodSearch").value.trim().toLowerCase(), seen=new Set(), list=[];
@@ -342,7 +342,7 @@ function renderFoods(){
   $("foodList").innerHTML=list.length?list.map((f,i)=>`<li><button data-food="${i}"><span>${esc(f.name)}${f.recent?' <span class="small muted">recent</span>':""}</span><span class="num">${fmt(f.kcal)}</span><span class="sub num">${esc(f.serving||"1 serving")} · P ${fmt(f.p)} · C ${fmt(f.c)} · F ${fmt(f.f)}</span></button></li>`).join("")
     :`<li class="small muted" style="padding:12px 2px">No match in your list. Tap the online search button above, scan its barcode, or enter it under Manual.</li>`;
 }
-function remember(f){const k=f.name.toLowerCase();S.foods=[{name:f.name,serving:f.serving,kcal:f.kcal,p:f.p,c:f.c,f:f.f,fiber:f.fiber||0,sodium:f.sodium||0},...S.foods.filter(x=>x.name.toLowerCase()!==k)].slice(0,40);store.set("foods",{items:S.foods})}
+function remember(f){const k=f.name.toLowerCase();S.foods=[{name:f.name,serving:f.serving,kcal:f.kcal,p:f.p,c:f.c,f:f.f,fiber:f.fiber||0,sodium:f.sodium||0,code:f.code||(S.foods.find(x=>x.name.toLowerCase()===k)||{}).code},...S.foods.filter(x=>x.name.toLowerCase()!==k)].slice(0,40);store.set("foods",{items:S.foods})}
 const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 function addEntries(items,meal){for(const f of items){day().entries.push({id:newId(),meal,name:f.name,serving:f.serving||"",qty:f.qty||1,kcal:num(f.kcal),p:num(f.p),c:num(f.c),f:num(f.f),fiber:num(f.fiber),sodium:num(f.sodium)});remember(f)}saveDay();render()}
 
@@ -351,11 +351,11 @@ $("tabs").addEventListener("click",e=>{const b=e.target.closest("button");if(b)s
 $("waterCard").addEventListener("click",e=>{const b=e.target.closest("[data-water]");if(!b)return;day().water=Math.max(0,(day().water||0)+ +b.dataset.water);saveDay();render()});
 $("closeAdd").onclick=()=>$("addDlg").close();
 $("foodSearch").addEventListener("input",renderFoods);
-$("foodList").addEventListener("click",e=>{const b=e.target.closest("[data-food]");if(b)fillForm({...S.foodView[+b.dataset.food],meal:S.addMeal})});
+$("foodList").addEventListener("click",e=>{const b=e.target.closest("[data-food]");if(b){S.pendingCode=null;fillForm({...S.foodView[+b.dataset.food],meal:S.addMeal})}});
 $("tab-manual").addEventListener("submit",e=>{
   e.preventDefault();
   const f={name:$("fName").value.trim(),serving:$("fServing").value.trim(),qty:num($("fQty").value)||1,kcal:num($("fKcal").value),p:num($("fP").value),c:num($("fC").value),f:num($("fF").value),sodium:num($("fSodium").value),...S.formExtra},meal=$("fMeal").value;
-  if(!f.name)return;
+  if(!f.name)return;if(S.pendingCode&&!S.editId)f.code=S.pendingCode;
   if(S.editId){const en=day().entries.find(x=>x.id===S.editId);if(en){Object.assign(en,f,{meal});saveDay();render()}toast("Saved")}
   else{addEntries([f],meal);toast("Added to "+meal.toLowerCase())}
   $("addDlg").close();
@@ -371,29 +371,39 @@ function offItem(p){
   const name=[p.brands&&String(p.brands).split(",")[0].trim(),p.product_name].filter(Boolean).join(" ").slice(0,80);
   return {name:name||"Unnamed product",serving:per==="_serving"?String(p.serving_size||"1 serving").slice(0,40):"100 g",kcal:R(g("energy-kcal")),p:g("proteins"),c:g("carbohydrates"),f:g("fat"),fiber:g("fiber"),sodium:R(g("sodium")*1000)};
 }
+function newCam(){const F=window.Html5QrcodeSupportedFormats;return new Html5Qrcode("reader",{formatsToSupport:F?[F.UPC_A,F.UPC_E,F.EAN_13,F.EAN_8,F.CODE_128]:undefined,experimentalFeatures:{useBarCodeDetectorIfSupported:true},verbose:false})}
+async function usda(code){
+  const r=await fetch("https://api.nal.usda.gov/fdc/v1/foods/search?query="+code+"&dataType=Branded&pageSize=5&api_key=DEMO_KEY");if(!r.ok)return null;
+  const j=await r.json(),strip=x=>String(x||"").replace(/^0+/,""),f=(j.foods||[]).find(x=>strip(x.gtinUpc)===strip(code));if(!f)return null;
+  const sz=num(f.servingSize)||100,n=id=>{const x=(f.foodNutrients||[]).find(y=>y.nutrientId===id);return x?num(x.value)*sz/100:0},r1=v=>Math.round(v*10)/10;
+  return {name:[f.brandName||f.brandOwner,f.description].filter(Boolean).join(" ").slice(0,80),serving:String(f.householdServingFullText||(sz+" "+(f.servingSizeUnit||"g"))).slice(0,40),kcal:R(n(1008)),p:r1(n(1003)),c:r1(n(1005)),f:r1(n(1004)),fiber:r1(n(1079)),sodium:R(n(1093))};
+}
 async function lookup(code){
   code=String(code||"").replace(/\D/g,"");const out=$("scanOut");
   if(code.length<8){out.innerHTML='<div class="note">That does not look like a full barcode number.</div>';return}
-  $("codeInput").value=code;out.innerHTML='<div class="note">Looking up '+esc(code)+'…</div>';
-  try{
-    const r=await fetch("https://world.openfoodfacts.org/api/v2/product/"+code+".json?fields="+OFF_FIELDS),j=await r.json();
-    if(!j||!j.product||j.status===0){out.innerHTML='<div class="note">No product found for '+esc(code)+'. Enter it once under Manual and it will be saved to your foods.</div>';return}
-    const it=offItem(j.product);out.innerHTML="";
-    fillForm({...it,meal:S.addMeal});
-    toast(it.kcal?"Found it. Check the serving and save.":"Found it, but the database has no nutrition numbers. Fill them in from the label.");
-  }catch(e){out.innerHTML='<div class="note">The lookup did not go through. Check your connection and try again.</div>'}
+  $("codeInput").value=code;
+  const saved=S.foods.find(f=>f.code===code);
+  if(saved){out.innerHTML="";fillForm({...saved,meal:S.addMeal});toast("Found in your saved foods");return}
+  out.innerHTML='<div class="note">Looking up '+esc(code)+'…</div>';
+  let it=null,netErr=false;
+  try{const r=await fetch("https://world.openfoodfacts.org/api/v2/product/"+code+".json?fields="+OFF_FIELDS),j=await r.json();if(j&&j.product&&j.status!==0)it=offItem(j.product)}catch(e){netErr=true}
+  if(!it||!it.kcal){try{const u=await usda(code);if(u)it=u}catch(e){}}
+  if(it){S.pendingCode=code;out.innerHTML="";fillForm({...it,meal:S.addMeal});toast(it.kcal?"Found it. Check the serving and save.":"Found it, but there are no nutrition numbers. Fill them in from the label.");return}
+  if(netErr){out.innerHTML='<div class="note">The lookup did not go through. Check your connection and try again.</div>';return}
+  out.innerHTML='<div class="note">'+esc(code)+' is not in the free databases yet. Store brands often are not. Enter it once from the label and this barcode will be remembered on your phone.</div><div class="actions" style="margin-top:10px"><button type="button" class="btn primary" id="enterNow">Enter it now</button></div>';
+  $("enterNow").onclick=()=>{S.pendingCode=code;fillForm({meal:S.addMeal})};
 }
 $("camBtn").onclick=async()=>{
   if(camOn){stopCam();return}
   if(!window.Html5Qrcode){$("scanOut").innerHTML='<div class="note">The camera scanner did not load. Type the barcode number instead.</div>';return}
   try{
-    cam=cam||new Html5Qrcode("reader");camOn=true;$("camBtn").textContent="Stop camera";$("scanOut").innerHTML="";
-    await cam.start({facingMode:"environment"},{fps:10,qrbox:{width:250,height:150}},async txt=>{if(!camOn)return;await stopCam();lookup(txt)},()=>{});
+    cam=cam||newCam();camOn=true;$("camBtn").textContent="Stop camera";$("scanOut").innerHTML='<div class="note">Hold the barcode inside the box, about 6 inches away, and keep it steady. If it will not read, type the number printed under the bars.</div>';
+    await cam.start({facingMode:"environment"},{fps:15,qrbox:(w,h)=>({width:Math.floor(w*0.92),height:Math.floor(Math.min(h*0.5,w*0.5))}),videoConstraints:{facingMode:"environment",width:{ideal:1920},height:{ideal:1080}}},async txt=>{if(!camOn)return;await stopCam();lookup(txt)},()=>{});
   }catch(e){camOn=false;$("camBtn").textContent="Start camera";$("scanOut").innerHTML='<div class="note">The camera could not start. Allow camera access for this site, use a photo, or type the number.</div>'}
 };
 $("scanFile").addEventListener("change",async e=>{
   const f=e.target.files[0];if(!f)return;await stopCam();
-  try{if(!window.Html5Qrcode)throw 0;cam=cam||new Html5Qrcode("reader");lookup(await cam.scanFile(f,false))}
+  try{if(!window.Html5Qrcode)throw 0;cam=cam||newCam();lookup(await cam.scanFile(f,false))}
   catch(_){$("scanOut").innerHTML='<div class="note">No barcode found in that photo. Try a closer, sharper shot or type the number.</div>'}
   e.target.value="";
 });
@@ -405,8 +415,12 @@ $("onlineBtn").onclick=async()=>{
   const q=$("foodSearch").value.trim(),b=$("onlineBtn");if(q.length<2){toast("Type a food name first");return}
   b.disabled=true;b.textContent="Searching…";
   try{
-    const r=await fetch("https://world.openfoodfacts.org/cgi/search.pl?search_terms="+encodeURIComponent(q)+"&search_simple=1&action=process&json=1&page_size=20&fields="+OFF_FIELDS),j=await r.json();
-    const list=(j.products||[]).map(offItem).filter(i=>i.kcal>0);S.foodView=list;
+    const base="https://world.openfoodfacts.org/cgi/search.pl?search_terms="+encodeURIComponent(q)+"&search_simple=1&action=process&json=1&page_size=20&fields="+OFF_FIELDS;
+    const get=async u=>{try{const r=await fetch(u);if(!r.ok)return[];return((await r.json()).products||[]).map(offItem).filter(i=>i.kcal>0)}catch(e){return null}};
+    let list=await get(base+"&tagtype_0=countries&tag_contains_0=contains&tag_0=united-states");
+    if(!list||!list.length)list=await get(base);
+    if(!list)throw 0;
+    S.foodView=list;
     $("foodList").innerHTML=list.length?list.map((f,i)=>`<li><button data-food="${i}"><span>${esc(f.name)}</span><span class="num">${fmt(f.kcal)}</span><span class="sub num">${esc(f.serving)} · P ${fmt(f.p)} · C ${fmt(f.c)} · F ${fmt(f.f)}</span></button></li>`).join(""):'<li class="small muted" style="padding:12px 2px">Nothing found online for that. Try fewer words, or enter it under Manual.</li>';
   }catch(e){toast("The online search did not go through")}
   finally{b.disabled=false;b.textContent="Search the online food database"}
